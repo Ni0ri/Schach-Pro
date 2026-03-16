@@ -1,0 +1,73 @@
+name: Build Schach Pro APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential git zip unzip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev lld
+
+      - name: Install Buildozer
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install 'buildozer>=1.5.0' 'cython>=0.29.36,<3.0.0'
+
+      - name: Create Icon
+        run: |
+          python3 -c "
+          import struct, zlib
+          def mk(path, size):
+              sq=size//8; L=(240,233,197); D=(74,124,89); px=[]
+              for y in range(size):
+                  row=[0]
+                  for x in range(size):
+                      c=L if (x//sq+y//sq)%2==0 else D; row.extend(c)
+                  px.append(bytes(row))
+              raw=b''.join(px)
+              def ch(ct,d):
+                  c=ct+d; return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c)&0xffffffff)
+              ihdr=struct.pack('>IIBBBBB',size,size,8,2,0,0,0)
+              with open(path,'wb') as f:
+                  f.write(b'\x89PNG\r\n\x1a\n'); f.write(ch(b'IHDR',ihdr)); f.write(ch(b'IDAT',zlib.compress(raw))); f.write(ch(b'IEND',b''))
+          mk('icon.png',192); mk('presplash.png',512); print('Icons OK')
+          "
+
+      - name: Build APK
+        run: buildozer android debug 2>&1 | tee build.log
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Schach-Pro-APK
+          path: bin/*.apk
+          retention-days: 30
+
+      - name: Upload Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
