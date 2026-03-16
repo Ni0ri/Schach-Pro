@@ -7,23 +7,21 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: Show Java Home
+        run: echo "JAVA_HOME=$JAVA_HOME"
 
       - name: Install System Dependencies
         run: |
@@ -34,6 +32,7 @@ jobs:
         run: |
           pip install --upgrade pip setuptools wheel
           pip install 'buildozer>=1.5.0' 'cython>=0.29.36,<3.0.0'
+          buildozer version
 
       - name: Create Icon
         run: |
@@ -55,19 +54,39 @@ jobs:
           mk('icon.png',192); mk('presplash.png',512); print('Icons OK')
           "
 
+      - name: Verify Files
+        run: |
+          echo "=== Dateien im Repo ==="
+          ls -la
+          echo ""
+          echo "=== main.py vorhanden ==="
+          head -5 main.py
+          echo ""
+          echo "=== buildozer.spec vorhanden ==="
+          head -5 buildozer.spec
+
       - name: Build APK
-        run: buildozer android debug 2>&1 | tee build.log
+        run: |
+          set -e
+          yes | buildozer android debug 2>&1 | tee build.log
+          echo ""
+          echo "=== Build fertig ==="
+          ls -la bin/ 2>/dev/null || echo "FEHLER: bin/ Ordner nicht erstellt"
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Schach-Pro-APK
           path: bin/*.apk
+          if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload Log on Failure
-        if: failure()
+      - name: Upload Build Log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
