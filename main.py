@@ -1,16 +1,8 @@
 """
-Schach Pro – Kivy Android App (Überarbeitet)
-=============================================
-Vollständig Android-kompatibel:
-  - Brett als GridLayout mit echten Buttons (kein Canvas-Absturz)
-  - Figuren als Buchstaben (immer sichtbar, kein Font-Problem)
-  - KI vs KI, Mensch vs KI, Mensch vs Mensch
-  - Suchtiefe 1–3 einstellbar (Handy-Performance)
-  - Sauberes Threading mit Stop-Event
-  - Undo-Funktion für menschliche Züge
-  - Piece-Square-Tables für verbesserte KI-Bewertung
+Schach Pro – Kivy Android App
+Android-sicher: keine module-level Kivy-Calls, kein Unicode in kritischen Stellen,
+alle UI-Updates über Clock, robustes Threading
 """
-
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
@@ -21,1260 +13,635 @@ from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
-from kivy.utils import get_color_from_hex
+import threading, time
 
-import threading
-import time
+# ══════════════════════════════════════════════════════════════════════
+# FARBEN (einfache Tupel, kein get_color_from_hex → kein Crash)
+# ══════════════════════════════════════════════════════════════════════
+BG       = (0.10, 0.10, 0.10, 1)
+ACCENT   = (0.79, 0.64, 0.15, 1)
+ACCENT_T = (0.10, 0.10, 0.10, 1)   # Text auf Accent-Buttons
+SQ_L     = (0.94, 0.91, 0.77, 1)
+SQ_D     = (0.29, 0.49, 0.35, 1)
+HL_L     = (0.96, 0.96, 0.41, 1)
+HL_D     = (0.73, 0.79, 0.17, 1)
+SEL_C    = (0.67, 0.87, 0.40, 1)
+CHK_C    = (0.80, 0.13, 0.13, 1)
+DOT_C    = (0.40, 0.85, 0.20, 1)
+BTN_DK   = (0.18, 0.16, 0.14, 1)
+TXT_LT   = (0.90, 0.85, 0.75, 1)
+TXT_DIM  = (0.55, 0.50, 0.40, 1)
 
+# ══════════════════════════════════════════════════════════════════════
+# FIGUREN-BUCHSTABEN (Android-sicher, immer sichtbar)
+# Weiss: K=Koenig D=Dame T=Turm L=Laeufer S=Springer B=Bauer
+# Schwarz: k=Koenig d=Dame t=Turm l=Laeufer s=Springer b=Bauer
+# ══════════════════════════════════════════════════════════════════════
+PL = {'K':'K','Q':'D','R':'T','B':'L','N':'S','P':'B',
+      'k':'k','q':'d','r':'t','b':'l','n':'s','p':'b'}
+FILES = 'abcdefgh'
 
-# ═══════════════════════════════════════════════════════════════════════
-#  KONSTANTEN
-# ═══════════════════════════════════════════════════════════════════════
-
-# -- Farben --
-COLOR_BACKGROUND    = get_color_from_hex('#1a1a1a')
-COLOR_ACCENT        = get_color_from_hex('#c9a227')
-COLOR_DARK          = get_color_from_hex('#232120')
-COLOR_SQUARE_LIGHT  = get_color_from_hex('#F0E9C5')
-COLOR_SQUARE_DARK   = get_color_from_hex('#4A7C59')
-COLOR_HIGHLIGHT_L   = get_color_from_hex('#F6F669')
-COLOR_HIGHLIGHT_D   = get_color_from_hex('#BACA2B')
-COLOR_SELECTED      = get_color_from_hex('#aadd66')
-COLOR_CHECK         = get_color_from_hex('#cc2222')
-COLOR_DOT           = get_color_from_hex('#88dd44')
-COLOR_BTN_ACTIVE    = (0.79, 0.64, 0.15, 1)
-COLOR_BTN_INACTIVE  = (0.22, 0.20, 0.18, 1)
-COLOR_TEXT_DARK     = (0.1, 0.1, 0.1, 1)
-COLOR_TEXT_LIGHT    = (0.9, 0.85, 0.75, 1)
-
-# -- Figurendarstellung (Buchstaben, Android-sicher) --
-PIECE_DISPLAY = {
-    'K': 'Kg', 'Q': 'D', 'R': 'T', 'B': 'L', 'N': 'S', 'P': 'B',
-    'k': 'Ks', 'q': 'd', 'r': 't', 'b': 'l', 'n': 's', 'p': 'b',
-}
-
-FILE_NAMES = 'abcdefgh'
-
-# -- Startstellung --
-INITIAL_BOARD = [
-    ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'],
-    ['p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'],
-    [None] * 8,
-    [None] * 8,
-    [None] * 8,
-    [None] * 8,
-    ['P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'],
-    ['R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R'],
+# ══════════════════════════════════════════════════════════════════════
+# SCHACH-ENGINE
+# ══════════════════════════════════════════════════════════════════════
+INIT = [
+    ['r','n','b','q','k','b','n','r'],
+    ['p','p','p','p','p','p','p','p'],
+    [None]*8,[None]*8,[None]*8,[None]*8,
+    ['P','P','P','P','P','P','P','P'],
+    ['R','N','B','Q','K','B','N','R']
 ]
+PVAL = {'P':100,'N':320,'B':330,'R':500,'Q':950,'K':0,
+        'p':100,'n':320,'b':330,'r':500,'q':950,'k':0}
+CONTEMPT = 70
 
-# -- Figurenwerte --
-PIECE_VALUES = {
-    'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 950, 'K': 0,
-}
+def iw(p): return p is not None and p == p.upper()
+def ok(r,c): return 0 <= r < 8 and 0 <= c < 8
 
-# -- Piece-Square-Tables (aus Weiß-Perspektive, Rang 0 = oberer Rand) --
-#    Positiver Wert = gute Position für die Figur
-PST_PAWN = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-    50, 50, 50, 50, 50, 50, 50, 50,
-    10, 10, 20, 30, 30, 20, 10, 10,
-     5,  5, 10, 25, 25, 10,  5,  5,
-     0,  0,  0, 20, 20,  0,  0,  0,
-     5, -5,-10,  0,  0,-10, -5,  5,
-     5, 10, 10,-20,-20, 10, 10,  5,
-     0,  0,  0,  0,  0,  0,  0,  0,
-]
-
-PST_KNIGHT = [
-    -50,-40,-30,-30,-30,-30,-40,-50,
-    -40,-20,  0,  0,  0,  0,-20,-40,
-    -30,  0, 10, 15, 15, 10,  0,-30,
-    -30,  5, 15, 20, 20, 15,  5,-30,
-    -30,  0, 15, 20, 20, 15,  0,-30,
-    -30,  5, 10, 15, 15, 10,  5,-30,
-    -40,-20,  0,  5,  5,  0,-20,-40,
-    -50,-40,-30,-30,-30,-30,-40,-50,
-]
-
-PST_BISHOP = [
-    -20,-10,-10,-10,-10,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0, 10, 10, 10, 10,  0,-10,
-    -10,  5,  5, 10, 10,  5,  5,-10,
-    -10,  0, 10, 10, 10, 10,  0,-10,
-    -10, 10, 10, 10, 10, 10, 10,-10,
-    -10,  5,  0,  0,  0,  0,  5,-10,
-    -20,-10,-10,-10,-10,-10,-10,-20,
-]
-
-PST_ROOK = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-     5, 10, 10, 10, 10, 10, 10,  5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-     0,  0,  0,  5,  5,  0,  0,  0,
-]
-
-PST_QUEEN = [
-    -20,-10,-10, -5, -5,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0,  5,  5,  5,  5,  0,-10,
-     -5,  0,  5,  5,  5,  5,  0, -5,
-      0,  0,  5,  5,  5,  5,  0, -5,
-    -10,  5,  5,  5,  5,  5,  0,-10,
-    -10,  0,  5,  0,  0,  0,  0,-10,
-    -20,-10,-10, -5, -5,-10,-10,-20,
-]
-
-PST_KING_MIDGAME = [
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -20,-30,-30,-40,-40,-30,-30,-20,
-    -10,-20,-20,-20,-20,-20,-20,-10,
-     20, 20,  0,  0,  0,  0, 20, 20,
-     20, 30, 10,  0,  0, 10, 30, 20,
-]
-
-PIECE_SQUARE_TABLES = {
-    'P': PST_PAWN, 'N': PST_KNIGHT, 'B': PST_BISHOP,
-    'R': PST_ROOK, 'Q': PST_QUEEN, 'K': PST_KING_MIDGAME,
-}
-
-# Bestrafung für Wiederholungsstellungen
-CONTEMPT_VALUE = 70
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  SCHACH-ENGINE
-# ═══════════════════════════════════════════════════════════════════════
-
-def is_white_piece(piece: str) -> bool:
-    """Prüft ob eine Figur weiß ist (Großbuchstabe)."""
-    return piece is not None and piece == piece.upper()
-
-
-def is_valid_square(row: int, col: int) -> bool:
-    """Prüft ob die Koordinaten auf dem Brett liegen."""
-    return 0 <= row < 8 and 0 <= col < 8
-
-
-def generate_pseudo_moves(
-    board: list, row: int, col: int,
-    is_white: bool, castling: frozenset, en_passant: tuple
-) -> list:
-    """
-    Erzeugt alle Pseudo-Züge einer Figur (ohne Schach-Prüfung).
-
-    Returns:
-        Liste von Zügen als (start_row, start_col, end_row, end_col)
-    """
-    piece = board[row][col]
-    piece_type = piece.upper()
-    moves = []
-
-    def try_add(target_row: int, target_col: int):
-        """Fügt einen Zug hinzu, wenn das Zielfeld gültig und nicht von eigener Figur besetzt ist."""
-        if is_valid_square(target_row, target_col):
-            target = board[target_row][target_col]
-            if not target or is_white_piece(target) != is_white:
-                moves.append((row, col, target_row, target_col))
-
-    def slide(directions: list):
-        """Erzeugt Züge für Gleitfiguren (Läufer, Turm, Dame)."""
-        for d_row, d_col in directions:
-            next_row, next_col = row + d_row, col + d_col
-            while is_valid_square(next_row, next_col):
-                target = board[next_row][next_col]
-                if target:
-                    if is_white_piece(target) != is_white:
-                        moves.append((row, col, next_row, next_col))
+def gen_pseudo(board, r, c, w, castle, ep):
+    p = board[r][c]; pt = p.upper(); mvs = []
+    def add(tr,tc):
+        if ok(tr,tc) and not(board[tr][tc] and iw(board[tr][tc])==w):
+            mvs.append((r,c,tr,tc))
+    def slide(dirs):
+        for dr,dc in dirs:
+            nr,nc = r+dr,c+dc
+            while ok(nr,nc):
+                q = board[nr][nc]
+                if q:
+                    if iw(q)!=w: mvs.append((r,c,nr,nc))
                     break
-                moves.append((row, col, next_row, next_col))
-                next_row += d_row
-                next_col += d_col
+                mvs.append((r,c,nr,nc)); nr+=dr; nc+=dc
+    if pt=='P':
+        d=-1 if w else 1; st=6 if w else 1
+        if ok(r+d,c) and not board[r+d][c]:
+            mvs.append((r,c,r+d,c))
+            if r==st and not board[r+2*d][c]: mvs.append((r,c,r+2*d,c))
+        for dc in [-1,1]:
+            nr,nc = r+d,c+dc
+            if ok(nr,nc):
+                if board[nr][nc] and iw(board[nr][nc])!=w: mvs.append((r,c,nr,nc))
+                elif ep==(nr,nc): mvs.append((r,c,nr,nc))
+    elif pt=='N':
+        for dr,dc in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)]: add(r+dr,c+dc)
+    elif pt=='B': slide([(-1,-1),(-1,1),(1,-1),(1,1)])
+    elif pt=='R': slide([(-1,0),(1,0),(0,-1),(0,1)])
+    elif pt=='Q': slide([(-1,-1),(-1,1),(1,-1),(1,1),(-1,0),(1,0),(0,-1),(0,1)])
+    elif pt=='K':
+        for dr in [-1,0,1]:
+            for dc in [-1,0,1]:
+                if dr or dc: add(r+dr,c+dc)
+        kr=7 if w else 0; rt='R' if w else 'r'
+        if r==kr and c==4:
+            ks='K' if w else 'k'; qs='Q' if w else 'q'
+            if ks in castle and not board[kr][5] and not board[kr][6] and board[kr][7]==rt:
+                mvs.append((r,c,kr,6))
+            if qs in castle and not board[kr][3] and not board[kr][2] and not board[kr][1] and board[kr][0]==rt:
+                mvs.append((r,c,kr,2))
+    return mvs
 
-    if piece_type == 'P':
-        direction = -1 if is_white else 1
-        start_rank = 6 if is_white else 1
+def do_move(board, mv, castle, ep):
+    b=[list(row) for row in board]
+    r1,c1,r2,c2=mv; p=b[r1][c1]; pt=p.upper()
+    cap=b[r2][c2]; nep=None
+    b[r2][c2]=p; b[r1][c1]=None
+    if pt=='P':
+        if r2==0: b[r2][c2]='Q'
+        elif r2==7: b[r2][c2]='q'
+        elif ep==(r2,c2):
+            er=r2+(1 if iw(p) else -1); cap=b[er][c2]; b[er][c2]=None
+        if abs(r2-r1)==2: nep=((r1+r2)//2,c2)
+    if pt=='K':
+        if c1==4 and c2==6: b[r1][5]=b[r1][7]; b[r1][7]=None
+        elif c1==4 and c2==2: b[r1][3]=b[r1][0]; b[r1][0]=None
+    nc=set(castle)
+    if pt=='K': nc -= ({'K','Q'} if iw(p) else {'k','q'})
+    for k,pos in [('K',(7,7)),('Q',(7,0)),('k',(0,7)),('q',(0,0))]:
+        if (r1,c1)==pos or (r2,c2)==pos: nc.discard(k)
+    return b, frozenset(nc), nep, cap
 
-        # Einzelschritt vorwärts
-        ahead_row = row + direction
-        if is_valid_square(ahead_row, col) and not board[ahead_row][col]:
-            moves.append((row, col, ahead_row, col))
-            # Doppelschritt vom Startrang
-            double_row = row + 2 * direction
-            if row == start_rank and not board[double_row][col]:
-                moves.append((row, col, double_row, col))
-
-        # Schlagen (diagonal)
-        for d_col in [-1, 1]:
-            target_row, target_col = row + direction, col + d_col
-            if is_valid_square(target_row, target_col):
-                target = board[target_row][target_col]
-                if target and is_white_piece(target) != is_white:
-                    moves.append((row, col, target_row, target_col))
-                elif en_passant == (target_row, target_col):
-                    moves.append((row, col, target_row, target_col))
-
-    elif piece_type == 'N':
-        for d_row, d_col in [
-            (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-            (1, -2), (1, 2), (2, -1), (2, 1),
-        ]:
-            try_add(row + d_row, col + d_col)
-
-    elif piece_type == 'B':
-        slide([(-1, -1), (-1, 1), (1, -1), (1, 1)])
-
-    elif piece_type == 'R':
-        slide([(-1, 0), (1, 0), (0, -1), (0, 1)])
-
-    elif piece_type == 'Q':
-        slide([(-1, -1), (-1, 1), (1, -1), (1, 1),
-               (-1, 0), (1, 0), (0, -1), (0, 1)])
-
-    elif piece_type == 'K':
-        # Normale Königszüge
-        for d_row in [-1, 0, 1]:
-            for d_col in [-1, 0, 1]:
-                if d_row or d_col:
-                    try_add(row + d_row, col + d_col)
-
-        # Rochade
-        king_rank = 7 if is_white else 0
-        rook_char = 'R' if is_white else 'r'
-        if row == king_rank and col == 4:
-            kingside = 'K' if is_white else 'k'
-            queenside = 'Q' if is_white else 'q'
-
-            # Kurze Rochade (Königsseite)
-            if (kingside in castling
-                    and not board[king_rank][5]
-                    and not board[king_rank][6]
-                    and board[king_rank][7] == rook_char):
-                moves.append((row, col, king_rank, 6))
-
-            # Lange Rochade (Damenseite)
-            if (queenside in castling
-                    and not board[king_rank][3]
-                    and not board[king_rank][2]
-                    and not board[king_rank][1]
-                    and board[king_rank][0] == rook_char):
-                moves.append((row, col, king_rank, 2))
-
-    return moves
-
-
-def execute_move(
-    board: list, move: tuple,
-    castling: frozenset, en_passant: tuple
-) -> tuple:
-    """
-    Führt einen Zug auf einer Kopie des Bretts aus.
-
-    Returns:
-        (neues_brett, neue_rochade, neues_en_passant, geschlagene_figur)
-    """
-    new_board = [list(rank) for rank in board]
-    start_row, start_col, end_row, end_col = move
-    piece = new_board[start_row][start_col]
-    piece_type = piece.upper()
-    captured = new_board[end_row][end_col]
-    new_en_passant = None
-
-    # Figur bewegen
-    new_board[end_row][end_col] = piece
-    new_board[start_row][start_col] = None
-
-    # Bauern-Sonderregeln
-    if piece_type == 'P':
-        # Umwandlung (automatisch zur Dame)
-        if end_row == 0:
-            new_board[end_row][end_col] = 'Q'
-        elif end_row == 7:
-            new_board[end_row][end_col] = 'q'
-
-        # En-Passant-Schlagen
-        elif en_passant == (end_row, end_col):
-            capture_row = end_row + (1 if is_white_piece(piece) else -1)
-            captured = new_board[capture_row][end_col]
-            new_board[capture_row][end_col] = None
-
-        # En-Passant-Feld setzen bei Doppelschritt
-        if abs(end_row - start_row) == 2:
-            new_en_passant = ((start_row + end_row) // 2, end_col)
-
-    # Rochade: Turm umsetzen
-    if piece_type == 'K':
-        if start_col == 4 and end_col == 6:  # Kurze Rochade
-            new_board[start_row][5] = new_board[start_row][7]
-            new_board[start_row][7] = None
-        elif start_col == 4 and end_col == 2:  # Lange Rochade
-            new_board[start_row][3] = new_board[start_row][0]
-            new_board[start_row][0] = None
-
-    # Rochade-Rechte aktualisieren
-    new_castling = set(castling)
-    if piece_type == 'K':
-        if is_white_piece(piece):
-            new_castling -= {'K', 'Q'}
-        else:
-            new_castling -= {'k', 'q'}
-
-    # Turm bewegt oder geschlagen → Rochade-Recht verlieren
-    rook_positions = {
-        'K': (7, 7), 'Q': (7, 0),
-        'k': (0, 7), 'q': (0, 0),
-    }
-    for right, position in rook_positions.items():
-        if (start_row, start_col) == position or (end_row, end_col) == position:
-            new_castling.discard(right)
-
-    return new_board, frozenset(new_castling), new_en_passant, captured
-
-
-def is_square_attacked(board: list, row: int, col: int, by_white: bool) -> bool:
-    """Prüft ob ein Feld von einer bestimmten Farbe angegriffen wird."""
-
-    # Springerangriffe
-    for d_row, d_col in [
-        (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-        (1, -2), (1, 2), (2, -1), (2, 1),
-    ]:
-        nr, nc = row + d_row, col + d_col
-        if is_valid_square(nr, nc):
-            piece = board[nr][nc]
-            if piece and piece.upper() == 'N' and is_white_piece(piece) == by_white:
-                return True
-
-    # Diagonale Angriffe (Läufer, Dame, König nah, Bauer nah)
-    for d_row, d_col in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
-        nr, nc = row + d_row, col + d_col
-        distance = 0
-        while is_valid_square(nr, nc):
-            piece = board[nr][nc]
-            if piece:
-                if is_white_piece(piece) == by_white:
-                    ptype = piece.upper()
-                    if ptype in ('B', 'Q'):
-                        return True
-                    if distance == 0 and ptype == 'K':
-                        return True
-                    if distance == 0 and ptype == 'P':
-                        # Weiße Bauern greifen nach oben an (d_row < 0 aus ihrer Sicht)
-                        if by_white and d_row == -1:
-                            return True
-                        if not by_white and d_row == 1:
-                            return True
+def sq_att(board,r,c,by_w):
+    for dr,dc in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)]:
+        nr,nc=r+dr,c+dc
+        if ok(nr,nc):
+            q=board[nr][nc]
+            if q and q.upper()=='N' and iw(q)==by_w: return True
+    for dr,dc in [(-1,-1),(-1,1),(1,-1),(1,1)]:
+        nr,nc=r+dr,c+dc; d=0
+        while ok(nr,nc):
+            q=board[nr][nc]
+            if q:
+                if iw(q)==by_w:
+                    t=q.upper()
+                    if t in ('B','Q'): return True
+                    if d==0 and t=='K': return True
+                    if d==0 and t=='P':
+                        if by_w and dr==-1: return True
+                        if not by_w and dr==1: return True
                 break
-            nr += d_row
-            nc += d_col
-            distance += 1
-
-    # Gerade Angriffe (Turm, Dame, König nah)
-    for d_row, d_col in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-        nr, nc = row + d_row, col + d_col
-        distance = 0
-        while is_valid_square(nr, nc):
-            piece = board[nr][nc]
-            if piece:
-                if is_white_piece(piece) == by_white:
-                    ptype = piece.upper()
-                    if ptype in ('R', 'Q'):
-                        return True
-                    if distance == 0 and ptype == 'K':
-                        return True
+            nr+=dr; nc+=dc; d+=1
+    for dr,dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+        nr,nc=r+dr,c+dc; d=0
+        while ok(nr,nc):
+            q=board[nr][nc]
+            if q:
+                if iw(q)==by_w:
+                    t=q.upper()
+                    if t in ('R','Q'): return True
+                    if d==0 and t=='K': return True
                 break
-            nr += d_row
-            nc += d_col
-            distance += 1
-
+            nr+=dr; nc+=dc; d+=1
     return False
 
-
-def find_king(board: list, is_white: bool) -> tuple:
-    """Findet die Position des Königs einer Farbe."""
-    king = 'K' if is_white else 'k'
-    for row in range(8):
-        for col in range(8):
-            if board[row][col] == king:
-                return row, col
+def king_pos(board,w):
+    k='K' if w else 'k'
+    for r in range(8):
+        for c in range(8):
+            if board[r][c]==k: return r,c
     return None
 
+def in_check(board,w):
+    p=king_pos(board,w)
+    return bool(p and sq_att(board,p[0],p[1],not w))
 
-def is_in_check(board: list, is_white: bool) -> bool:
-    """Prüft ob der König einer Farbe im Schach steht."""
-    king_square = find_king(board, is_white)
-    return bool(king_square and is_square_attacked(board, king_square[0], king_square[1], not is_white))
+def legal_moves(board,w,castle,ep):
+    res=[]
+    for r in range(8):
+        for c in range(8):
+            q=board[r][c]
+            if not q or iw(q)!=w: continue
+            for mv in gen_pseudo(board,r,c,w,castle,ep):
+                r1,c1,r2,c2=mv; pt=q.upper()
+                if pt=='K' and abs(c2-c1)==2:
+                    if in_check(board,w): continue
+                    step=1 if c2>c1 else -1
+                    if any(sq_att(board,r1,cc,not w) for cc in range(c1,c2+step,step)): continue
+                nb,nc2,ne,_=do_move(board,mv,castle,ep)
+                if not in_check(nb,w): res.append(mv)
+    return res
 
+def evaluate(board,w_persp):
+    score=0
+    for r in range(8):
+        for c in range(8):
+            p=board[r][c]
+            if not p: continue
+            score+=(1 if iw(p) else -1)*PVAL.get(p.upper(),0)
+    return score if w_persp else -score
 
-def get_legal_moves(
-    board: list, is_white: bool,
-    castling: frozenset, en_passant: tuple
-) -> list:
-    """
-    Erzeugt alle legalen Züge für eine Farbe.
-    Filtert Pseudo-Züge, die den eigenen König im Schach lassen.
-    """
-    legal = []
-    for row in range(8):
-        for col in range(8):
-            piece = board[row][col]
-            if not piece or is_white_piece(piece) != is_white:
-                continue
+def ab(board,depth,alpha,beta,w,castle,ep,stop_ev,phist):
+    if stop_ev.is_set(): return 0,None
+    mvs=legal_moves(board,w,castle,ep)
+    if not mvs:
+        return(-29000 if in_check(board,w) else -CONTEMPT),None
+    if depth==0:
+        return evaluate(board,w),None
+    mvs.sort(key=lambda m:-(PVAL.get((board[m[2]][m[3]] or ' ').upper(),0)))
+    best=-999999; bestmv=mvs[0]
+    for mv in mvs:
+        if stop_ev.is_set(): break
+        nb,nc,ne,_=do_move(board,mv,castle,ep)
+        key=''.join(p or '.' for row in nb for p in row)
+        np2=dict(phist); np2[key]=np2.get(key,0)+1
+        v=-CONTEMPT if np2[key]>=2 else -(ab(nb,depth-1,-beta,-alpha,not w,nc,ne,stop_ev,np2)[0])
+        if v>best: best=v; bestmv=mv
+        if v>alpha: alpha=v
+        if alpha>=beta: break
+    return best,bestmv
 
-            for move in generate_pseudo_moves(board, row, col, is_white, castling, en_passant):
-                _, _, end_row, end_col = move
-                piece_type = piece.upper()
+def think_ki(board,w,castle,ep,depth,stop_ev,phist):
+    lm=legal_moves(board,w,castle,ep)
+    if not lm: return None
+    best=lm[0]
+    for d in range(1,depth+1):
+        if stop_ev.is_set(): break
+        _,mv=ab(board,d,-999999,999999,w,castle,ep,stop_ev,dict(phist))
+        if mv and mv in lm and not stop_ev.is_set(): best=mv
+    return best if best in lm else lm[0]
 
-                # Rochade: König darf nicht über angegriffenes Feld ziehen
-                if piece_type == 'K' and abs(end_col - col) == 2:
-                    if is_in_check(board, is_white):
-                        continue
-                    step = 1 if end_col > col else -1
-                    path_attacked = any(
-                        is_square_attacked(board, row, c, not is_white)
-                        for c in range(col, end_col + step, step)
-                    )
-                    if path_attacked:
-                        continue
+# ══════════════════════════════════════════════════════════════════════
+# BRETT-WIDGET  (GridLayout mit Buttons — zuverlässig auf Android)
+# ══════════════════════════════════════════════════════════════════════
+class SqBtn(Button):
+    def __init__(self, row, col, **kw):
+        super().__init__(**kw)
+        self.row=row; self.col=col
+        self.background_normal=''
+        self.font_size=dp(18)
+        self.bold=True
+        self.border=(0,0,0,0)
+        self._set_bg(False,False,False)
 
-                # Zug ausführen und prüfen ob eigener König im Schach steht
-                new_board, _, _, _ = execute_move(board, move, castling, en_passant)
-                if not is_in_check(new_board, is_white):
-                    legal.append(move)
-
-    return legal
-
-
-# ── Bewertungsfunktion ────────────────────────────────────────────────
-
-def evaluate_position(board: list, perspective_white: bool) -> int:
-    """
-    Bewertet eine Stellung aus Sicht einer Farbe.
-    Nutzt Materialwerte und Piece-Square-Tables.
-    """
-    score = 0
-    for row in range(8):
-        for col in range(8):
-            piece = board[row][col]
-            if not piece:
-                continue
-
-            piece_type = piece.upper()
-            material = PIECE_VALUES.get(piece_type, 0)
-
-            # PST-Index: für Weiß direkt, für Schwarz gespiegelt
-            pst = PIECE_SQUARE_TABLES.get(piece_type)
-            positional = 0
-            if pst:
-                if is_white_piece(piece):
-                    positional = pst[row * 8 + col]
-                else:
-                    # Schwarz: Brett vertikal spiegeln
-                    positional = pst[(7 - row) * 8 + col]
-
-            total = material + positional
-            if is_white_piece(piece):
-                score += total
-            else:
-                score -= total
-
-    return score if perspective_white else -score
-
-
-# ── Alpha-Beta-Suche ──────────────────────────────────────────────────
-
-def alpha_beta_search(
-    board: list, depth: int, alpha: int, beta: int,
-    is_white: bool, castling: frozenset, en_passant: tuple,
-    stop_event: threading.Event, position_history: dict
-) -> tuple:
-    """
-    Alpha-Beta-Suche mit Zugsortierung.
-
-    Returns:
-        (bewertung, bester_zug)
-    """
-    if stop_event.is_set():
-        return 0, None
-
-    moves = get_legal_moves(board, is_white, castling, en_passant)
-
-    # Kein legaler Zug → Matt oder Patt
-    if not moves:
-        if is_in_check(board, is_white):
-            return -29000, None  # Matt
-        return -CONTEMPT_VALUE, None  # Patt (leichte Bestrafung)
-
-    # Blattknoten → statische Bewertung
-    if depth == 0:
-        return evaluate_position(board, is_white), None
-
-    # Zugsortierung: Schlagzüge zuerst (nach Wert der geschlagenen Figur)
-    moves.sort(
-        key=lambda m: -(PIECE_VALUES.get((board[m[2]][m[3]] or '').upper(), 0)),
-    )
-
-    best_score = -999999
-    best_move = moves[0]
-
-    for move in moves:
-        if stop_event.is_set():
-            break
-
-        new_board, new_castling, new_ep, _ = execute_move(board, move, castling, en_passant)
-
-        # Stellungswiederholung erkennen
-        position_key = _board_to_key(new_board)
-        new_history = dict(position_history)
-        new_history[position_key] = new_history.get(position_key, 0) + 1
-
-        if new_history[position_key] >= 2:
-            score = -CONTEMPT_VALUE  # Wiederholung vermeiden
-        else:
-            score = -alpha_beta_search(
-                new_board, depth - 1, -beta, -alpha,
-                not is_white, new_castling, new_ep,
-                stop_event, new_history,
-            )[0]
-
-        if score > best_score:
-            best_score = score
-            best_move = move
-        if score > alpha:
-            alpha = score
-        if alpha >= beta:
-            break  # Beta-Cutoff
-
-    return best_score, best_move
-
-
-def find_best_move(
-    board: list, is_white: bool,
-    castling: frozenset, en_passant: tuple,
-    max_depth: int, stop_event: threading.Event,
-    position_history: dict,
-) -> tuple:
-    """
-    Findet den besten Zug mittels iterativer Tiefensuche.
-    Gibt None zurück, wenn kein legaler Zug existiert.
-    """
-    legal = get_legal_moves(board, is_white, castling, en_passant)
-    if not legal:
-        return None
-
-    best = legal[0]
-    for depth in range(1, max_depth + 1):
-        if stop_event.is_set():
-            break
-        _, move = alpha_beta_search(
-            board, depth, -999999, 999999,
-            is_white, castling, en_passant,
-            stop_event, dict(position_history),
-        )
-        if move and move in legal and not stop_event.is_set():
-            best = move
-
-    return best if best in legal else legal[0]
-
-
-def _board_to_key(board: list) -> str:
-    """Erzeugt einen kompakten String-Schlüssel für eine Stellung."""
-    return ''.join(piece or '.' for rank in board for piece in rank)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  SPIELZUSTAND (für Undo)
-# ═══════════════════════════════════════════════════════════════════════
-
-class GameState:
-    """Speichert den vollständigen Spielzustand für Undo."""
-
-    __slots__ = [
-        'board', 'white_to_move', 'castling', 'en_passant',
-        'position_history', 'halfmove_clock', 'move_number',
-        'last_move', 'check_side',
-    ]
-
-    def __init__(
-        self, board, white_to_move, castling, en_passant,
-        position_history, halfmove_clock, move_number,
-        last_move, check_side,
-    ):
-        self.board = [list(rank) for rank in board]
-        self.white_to_move = white_to_move
-        self.castling = castling
-        self.en_passant = en_passant
-        self.position_history = dict(position_history)
-        self.halfmove_clock = halfmove_clock
-        self.move_number = move_number
-        self.last_move = last_move
-        self.check_side = check_side
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  BRETT-WIDGET
-# ═══════════════════════════════════════════════════════════════════════
-
-class SquareButton(Button):
-    """Ein einzelnes Schachfeld als Kivy-Button."""
-
-    def __init__(self, row: int, col: int, **kwargs):
-        super().__init__(**kwargs)
-        self.row = row
-        self.col = col
-        self.piece = None
-        self.is_light = (row + col) % 2 == 0
-        self.is_selected = False
-        self.is_highlighted = False
-        self.is_move_dot = False
-        self.is_in_check = False
-        self.font_size = dp(20)
-        self.bold = True
-        self.border = (0, 0, 0, 0)
-        self._apply_background()
-
-    def update(
-        self, piece: str, selected: bool,
-        highlighted: bool, move_dot: bool, in_check: bool,
-    ):
-        """Aktualisiert Zustand und Darstellung des Felds."""
-        self.piece = piece
-        self.is_selected = selected
-        self.is_highlighted = highlighted
-        self.is_move_dot = move_dot
-        self.is_in_check = in_check
-        self._apply_background()
-
+    def update(self, piece, sel, hl, dot, chk):
+        light=(self.row+self.col)%2==0
+        # Hintergrundfarbe
+        if chk:      bg=CHK_C
+        elif sel:    bg=SEL_C
+        elif hl:     bg=HL_L if light else HL_D
+        else:        bg=SQ_L if light else SQ_D
+        self.background_color=bg
+        # Text
         if piece:
-            self.text = PIECE_DISPLAY.get(piece, piece)
-            # Weiße Figuren: dunkler Text auf hellem Grund
-            # Schwarze Figuren: heller Text
-            self.color = COLOR_TEXT_DARK if is_white_piece(piece) else (1, 1, 1, 1)
-        elif move_dot:
-            self.text = '•'
-            self.color = (0.4, 0.85, 0.2, 1)
+            self.text=PL.get(piece,'?')
+            self.color=(0.08,0.08,0.08,1) if iw(piece) else (0.98,0.98,0.98,1)
+            self.font_size=dp(20)
+        elif dot:
+            self.text='*'
+            self.color=DOT_C
+            self.font_size=dp(14)
         else:
-            self.text = ''
+            self.text=''
 
-    def _apply_background(self):
-        """Setzt die Hintergrundfarbe basierend auf dem Zustand."""
-        if self.is_in_check:
-            bg = (0.8, 0.13, 0.13, 1)
-        elif self.is_selected:
-            bg = (0.67, 0.87, 0.4, 1)
-        elif self.is_highlighted:
-            bg = (0.96, 0.96, 0.41, 1) if self.is_light else (0.73, 0.79, 0.17, 1)
-        else:
-            bg = (0.94, 0.91, 0.77, 1) if self.is_light else (0.29, 0.49, 0.35, 1)
-
-        self.background_normal = ''
-        self.background_color = bg
+    def _set_bg(self,sel,hl,chk):
+        light=(self.row+self.col)%2==0
+        if chk: self.background_color=CHK_C
+        elif sel: self.background_color=SEL_C
+        elif hl: self.background_color=HL_L if light else HL_D
+        else: self.background_color=SQ_L if light else SQ_D
 
 
-class BoardWidget(GridLayout):
-    """8×8-Schachbrett aus SquareButtons."""
+class BoardGrid(GridLayout):
+    def __init__(self, app_ref, **kw):
+        super().__init__(cols=8, spacing=0, **kw)
+        self.app_ref=app_ref
+        self.sqs={}
+        # Rank 7..0 von oben nach unten
+        for rank in range(7,-1,-1):
+            for fil in range(8):
+                btn=SqBtn(rank,fil,size_hint=(1,None))
+                btn.bind(on_press=lambda b,r=rank,c=fil: self.app_ref.on_tap(r,c))
+                self.sqs[(rank,fil)]=btn
+                self.add_widget(btn)
+        self.bind(width=self._resize)
 
-    def __init__(self, on_square_tap, **kwargs):
-        super().__init__(cols=8, rows=8, spacing=1, **kwargs)
-        self._on_tap = on_square_tap
-        self.squares: dict = {}
+    def _resize(self,*a):
+        sq=self.width/8
+        for btn in self.sqs.values():
+            btn.height=sq
+            btn.font_size=sq*0.55
 
-        # Felder erzeugen (Rang 7 oben, Rang 0 unten)
-        for rank in range(7, -1, -1):
-            for file in range(8):
-                square = SquareButton(rank, file)
-                square.bind(
-                    on_press=lambda btn, r=rank, c=file: self._on_tap(r, c)
-                )
-                self.squares[(rank, file)] = square
-                self.add_widget(square)
-
-    def refresh(
-        self, board: list, selected: tuple,
-        legal_targets: list, last_move: tuple,
-        check_side: bool,
-    ):
-        """Aktualisiert alle Felder des Bretts."""
-        for (row, col), square in self.squares.items():
-            piece = board[row][col]
-            is_selected = selected == (row, col)
-            is_highlighted = bool(
-                last_move and (
-                    (last_move[0] == row and last_move[1] == col)
-                    or (last_move[2] == row and last_move[3] == col)
-                )
-            )
-            is_dot = (row, col) in legal_targets
-            is_check = (
-                (piece == 'K' and check_side is True)
-                or (piece == 'k' and check_side is False)
-            )
-            square.update(piece, is_selected, is_highlighted, is_dot, is_check)
+    def refresh(self, board, selected, legal_hl, last_mv, chkside):
+        for (r,c),btn in self.sqs.items():
+            p=board[r][c]
+            sel=selected==(r,c)
+            hl=bool(last_mv and(
+                (last_mv[0]==r and last_mv[1]==c) or
+                (last_mv[2]==r and last_mv[3]==c)))
+            dot=(r,c) in legal_hl
+            chk=(p=='K' and chkside is True) or (p=='k' and chkside is False)
+            btn.update(p,sel,hl,dot,chk)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  HAUPT-APP
-# ═══════════════════════════════════════════════════════════════════════
-
+# ══════════════════════════════════════════════════════════════════════
+# HAUPT-APP
+# ══════════════════════════════════════════════════════════════════════
 class ChessApp(App):
-    """Schach Pro – Kivy-App mit KI, Undo und konfigurierbaren Spielmodi."""
 
-    MODE_LABELS = ['KI vs KI', 'Mensch vs KI', 'Mensch vs Mensch']
-    MODE_KEYS = ['ai_vs_ai', 'human_vs_ai', 'human_vs_human']
-
-    def __init__(self):
-        super().__init__()
-        # Spieleinstellungen
-        self.mode: str = 'ai_vs_ai'
-        self.human_plays_white: bool = True
-        self.depth_white: int = 2
-        self.depth_black: int = 2
-
+    def __init__(self,**kw):
+        super().__init__(**kw)
         # Spielzustand
-        self._init_game_state()
-
-        # UI-Referenzen
-        self.board_widget: BoardWidget = None
-        self.status_label: Label = None
-        self.log_label: Label = None
-        self.clock_white_label: Label = None
-        self.clock_black_label: Label = None
-
+        self._reset_state()
+        # Einstellungen
+        self.mode      ='kiki'    # 'kiki' | 'human_ki' | 'human_human'
+        self.human_col =True      # True=Weiss spielt Mensch
+        self.depth_w   =2
+        self.depth_b   =2
         # Threading
-        self._stop_event = threading.Event()
-        self._ai_busy = False
+        self._stop_ev  =threading.Event()
+        self._ki_busy  =False
+        # UI-Refs (werden in build() gesetzt)
+        self.board_grid=None
+        self.status_lbl=None
+        self.clock_w   =None
+        self.clock_b   =None
+        self.log_lbl   =None
 
-        # Undo-Verlauf
-        self._history: list = []
-        self._log_lines: list = []
+    def _reset_state(self):
+        self.board  =[list(r) for r in INIT]
+        self.wturn  =True
+        self.castle =frozenset('KQkq')
+        self.ep     =None
+        self.phist  ={}
+        self.hclk   =0
+        self.mc     =0
+        self.last_mv=None
+        self.chkside=None
+        self.selected=None
+        self.legal_hl=[]
+        self.log_lines=[]
+        self.running=False
 
-    def _init_game_state(self):
-        """Setzt den Spielzustand auf Anfangsstellung zurück."""
-        self.board = [list(rank) for rank in INITIAL_BOARD]
-        self.white_to_move = True
-        self.castling = frozenset('KQkq')
-        self.en_passant = None
-        self.position_history: dict = {}
-        self.halfmove_clock = 0
-        self.move_number = 0
-        self.last_move = None
-        self.check_side = None
-        self.selected_square = None
-        self.legal_targets: list = []
-        self.is_running = False
-        self._ai_busy = False
-
-    # ── UI aufbauen ───────────────────────────────────────────────────
-
+    # ── Build UI ──────────────────────────────────────────────────────
     def build(self):
-        Window.clearcolor = (0.1, 0.1, 0.1, 1)
-        root = BoxLayout(orientation='vertical', spacing=dp(3), padding=dp(4))
+        Window.clearcolor=BG
+        root=BoxLayout(orientation='vertical',spacing=dp(2),padding=dp(3))
 
         # Titel
-        title = Label(
-            text='♟  Schach Pro',
-            size_hint_y=None, height=dp(32),
-            font_size=dp(18), bold=True,
-            color=list(COLOR_ACCENT) + [1],
-        )
-        root.add_widget(title)
+        root.add_widget(Label(
+            text='Schach Pro',
+            size_hint_y=None,height=dp(30),
+            font_size=dp(17),bold=True,color=ACCENT))
 
-        # Statuszeile
-        self.status_label = Label(
-            text='Bereit – drücke Start',
-            size_hint_y=None, height=dp(22),
-            font_size=dp(11), color=(0.7, 0.65, 0.5, 1),
-        )
-        root.add_widget(self.status_label)
+        # Status
+        self.status_lbl=Label(
+            text='Bereit  -  Einstellungen -> Start',
+            size_hint_y=None,height=dp(20),
+            font_size=dp(11),color=TXT_DIM)
+        root.add_widget(self.status_lbl)
 
-        # Uhr Schwarz (oben)
-        self.clock_black_label = Label(
-            text='♚ Schwarz',
-            size_hint_y=None, height=dp(26),
-            font_size=dp(13), bold=True,
-            color=(0.9, 0.4, 0.4, 1),
-        )
-        root.add_widget(self.clock_black_label)
+        # Uhr Schwarz
+        self.clock_b=Label(
+            text='Schwarz',size_hint_y=None,height=dp(24),
+            font_size=dp(13),bold=True,color=(0.9,0.4,0.4,1))
+        root.add_widget(self.clock_b)
 
-        # Schachbrett
-        self.board_widget = BoardWidget(on_square_tap=self.on_square_tap)
-        root.add_widget(self.board_widget)
-        self.board_widget.refresh(self.board, None, [], None, None)
+        # Brett
+        self.board_grid=BoardGrid(self)
+        root.add_widget(self.board_grid)
+        self.board_grid.refresh(self.board,None,[],None,None)
 
-        # Uhr Weiß (unten)
-        self.clock_white_label = Label(
-            text='♔ Weiß',
-            size_hint_y=None, height=dp(26),
-            font_size=dp(13), bold=True,
-            color=(0.4, 0.9, 0.4, 1),
-        )
-        root.add_widget(self.clock_white_label)
+        # Uhr Weiss
+        self.clock_w=Label(
+            text='Weiss',size_hint_y=None,height=dp(24),
+            font_size=dp(13),bold=True,color=(0.4,0.9,0.4,1))
+        root.add_widget(self.clock_w)
 
         # Buttons
-        button_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(4))
-        buttons = [
-            ('▶ Start', self.start_game, True),
-            ('■ Stopp', self.stop_game, False),
-            ('↺ Neu', self.new_game, False),
-            ('↶ Undo', self.undo_move, False),
-            ('⚙', self.open_settings, False),
-        ]
-        for label, callback, is_primary in buttons:
-            btn = Button(
-                text=label, font_size=dp(13),
-                background_normal='',
-                background_color=COLOR_BTN_ACTIVE if is_primary else COLOR_BTN_INACTIVE,
-                color=COLOR_TEXT_DARK if is_primary else COLOR_TEXT_LIGHT,
-            )
-            btn.bind(on_press=lambda x, fn=callback: fn())
-            button_row.add_widget(btn)
-        root.add_widget(button_row)
+        btn_row=BoxLayout(size_hint_y=None,height=dp(48),spacing=dp(4))
+        for txt,fn in [('START',self.start_game),
+                       ('STOPP',self.stop_game),
+                       ('NEU',  self.new_game),
+                       ('OPT',  self.open_settings)]:
+            b=Button(text=txt,font_size=dp(13),bold=True,
+                     background_normal='',
+                     background_color=ACCENT if txt=='START' else BTN_DK,
+                     color=ACCENT_T if txt=='START' else TXT_LT)
+            b.bind(on_press=lambda x,f=fn:f())
+            btn_row.add_widget(b)
+        root.add_widget(btn_row)
 
-        # Zugprotokoll
-        scroll_view = ScrollView(size_hint_y=None, height=dp(80))
-        self.log_label = Label(
-            text='', font_size=dp(10),
-            size_hint_y=None,
-            color=(0.85, 0.8, 0.65, 1),
-            halign='left', valign='top',
-            text_size=(Window.width - dp(16), None),
-        )
-        self.log_label.bind(texture_size=self.log_label.setter('size'))
-        scroll_view.add_widget(self.log_label)
-        root.add_widget(scroll_view)
+        # Zuglog
+        sv=ScrollView(size_hint_y=None,height=dp(70))
+        self.log_lbl=Label(
+            text='',font_size=dp(10),
+            size_hint_y=None,color=TXT_LT,
+            halign='left',valign='top')
+        self.log_lbl.bind(texture_size=self.log_lbl.setter('size'))
+        sv.add_widget(self.log_lbl)
+        root.add_widget(sv)
 
         # Legende
-        legend = Label(
-            text=(
-                'Weiß: Kg=König D=Dame T=Turm L=Läufer S=Springer B=Bauer\n'
-                'Schwarz: Ks=König d=Dame t=Turm l=Läufer s=Springer b=Bauer'
-            ),
-            size_hint_y=None, height=dp(30),
-            font_size=dp(8), color=(0.5, 0.5, 0.5, 1),
-        )
-        root.add_widget(legend)
+        root.add_widget(Label(
+            text='W: K=Koenig D=Dame T=Turm L=Laeufer S=Springer B=Bauer'
+                 '  |  s: k d t l s b',
+            size_hint_y=None,height=dp(22),
+            font_size=dp(8),color=TXT_DIM))
 
         return root
 
-    # ── Spielsteuerung ────────────────────────────────────────────────
+    # ── Tap ───────────────────────────────────────────────────────────
+    def on_tap(self,r,c):
+        if not self.running or self._ki_busy: return
+        if self.mode=='kiki': return
 
-    def start_game(self):
-        """Startet ein neues Spiel im gewählten Modus."""
-        if self.is_running:
-            return
+        # Welche Farbe darf klicken?
+        if self.mode=='human_ki':
+            if self.wturn!=self.human_col: return
+            hw=self.human_col
+        else:   # human_human
+            hw=self.wturn
 
-        self._init_game_state()
-        self._history.clear()
-        self._log_lines.clear()
-        self.is_running = True
-        self._stop_event.clear()
-        self._update_status('Spiel läuft…')
-        Clock.schedule_once(self._refresh_board, 0)
-
-        if self.mode == 'ai_vs_ai':
-            threading.Thread(target=self._ai_vs_ai_loop, daemon=True).start()
-        elif self.mode == 'human_vs_ai':
-            if self.human_plays_white:
-                self._update_status('Dein Zug! (Weiß)')
-            else:
-                self._update_status('KI denkt…')
-                threading.Thread(target=self._ai_single_turn, daemon=True).start()
+        # Figur auswählen
+        if self.selected is None:
+            p=self.board[r][c]
+            if p and iw(p)==hw:
+                self.selected=(r,c)
+                lm=legal_moves(self.board,hw,self.castle,self.ep)
+                self.legal_hl=[(m[2],m[3]) for m in lm if m[0]==r and m[1]==c]
         else:
-            self._update_status('♙ Weiß am Zug')
-
-    def stop_game(self):
-        """Stoppt das laufende Spiel."""
-        self._stop_event.set()
-        self.is_running = False
-        self._ai_busy = False
-        self._update_status('Gestoppt.')
-
-    def new_game(self):
-        """Setzt das Spiel komplett zurück."""
-        self.stop_game()
-        Clock.schedule_once(lambda dt: self._do_new_game(), 0.2)
-
-    def _do_new_game(self):
-        self._init_game_state()
-        self._history.clear()
-        self._log_lines.clear()
-        Clock.schedule_once(self._refresh_board, 0)
-        self._update_status('Bereit – drücke Start')
-
-    def undo_move(self):
-        """Macht den letzten Zug rückgängig (nur im Mensch-Modus)."""
-        if self.mode == 'ai_vs_ai' or self._ai_busy or not self._history:
-            return
-
-        # Bei Mensch vs KI: zwei Züge zurück (Mensch + KI)
-        if self.mode == 'human_vs_ai' and len(self._history) >= 2:
-            self._history.pop()  # KI-Zug rückgängig
-            self._log_lines.pop()
-
-        state = self._history.pop()
-        if self._log_lines:
-            self._log_lines.pop()
-
-        self.board = state.board
-        self.white_to_move = state.white_to_move
-        self.castling = state.castling
-        self.en_passant = state.en_passant
-        self.position_history = state.position_history
-        self.halfmove_clock = state.halfmove_clock
-        self.move_number = state.move_number
-        self.last_move = state.last_move
-        self.check_side = state.check_side
-        self.selected_square = None
-        self.legal_targets = []
-
-        Clock.schedule_once(self._refresh_board, 0)
-        self._update_status('Zug zurückgenommen')
-
-    # ── KI-Schleifen ──────────────────────────────────────────────────
-
-    def _ai_vs_ai_loop(self):
-        """KI gegen KI: Abwechselnd Züge berechnen."""
-        while self.is_running and not self._stop_event.is_set():
-            if self._check_game_end():
+            lm=legal_moves(self.board,hw,self.castle,self.ep)
+            mv=(self.selected[0],self.selected[1],r,c)
+            if mv in lm:
+                self.selected=None; self.legal_hl=[]
+                self._apply(mv,hw)
+                Clock.schedule_once(self._refresh,0)
+                if not self._check_end():
+                    if self.mode=='human_ki':
+                        threading.Thread(target=self._ki_one,daemon=True).start()
+                    else:
+                        nxt='Weiss' if self.wturn else 'Schwarz'
+                        self._setstatus(nxt+' am Zug')
                 return
-
-            is_white = self.white_to_move
-            color_name = 'Weiß' if is_white else 'Schwarz'
-            self._update_status(f'{color_name} denkt…')
-            self._ai_busy = True
-
-            depth = self.depth_white if is_white else self.depth_black
-            move = find_best_move(
-                self.board, is_white, self.castling, self.en_passant,
-                depth, self._stop_event, self.position_history,
-            )
-
-            self._ai_busy = False
-            if self._stop_event.is_set():
-                return
-
-            if move:
-                self._apply_move(move, is_white)
-                Clock.schedule_once(self._refresh_board, 0)
-
-            time.sleep(0.4)
-
-    def _ai_single_turn(self):
-        """Ein einzelner KI-Zug (für Mensch vs KI)."""
-        if self._stop_event.is_set() or not self.is_running:
-            return
-
-        is_white = self.white_to_move
-        color_name = 'Weiß' if is_white else 'Schwarz'
-        self._update_status(f'{color_name} (KI) denkt…')
-        self._ai_busy = True
-
-        depth = self.depth_white if is_white else self.depth_black
-        move = find_best_move(
-            self.board, is_white, self.castling, self.en_passant,
-            depth, self._stop_event, self.position_history,
-        )
-
-        self._ai_busy = False
-        if self._stop_event.is_set() or not self.is_running:
-            return
-
-        if move:
-            self._apply_move(move, is_white)
-            Clock.schedule_once(self._refresh_board, 0)
-            self._check_game_end()
-
-    # ── Spielende prüfen ──────────────────────────────────────────────
-
-    def _check_game_end(self) -> bool:
-        """Prüft auf Matt, Patt, 50-Züge-Regel und Stellungswiederholung."""
-        legal = get_legal_moves(self.board, self.white_to_move, self.castling, self.en_passant)
-
-        if not legal:
-            if is_in_check(self.board, self.white_to_move):
-                winner = 'Schwarz' if self.white_to_move else 'Weiß'
-                message = f'Schachmatt! {winner} gewinnt!'
             else:
-                message = 'Remis – Patt!'
-            self._end_game(message)
-            return True
+                p=self.board[r][c]
+                if p and iw(p)==hw:
+                    self.selected=(r,c)
+                    lm2=legal_moves(self.board,hw,self.castle,self.ep)
+                    self.legal_hl=[(m[2],m[3]) for m in lm2 if m[0]==r and m[1]==c]
+                else:
+                    self.selected=None; self.legal_hl=[]
 
-        if self.halfmove_clock >= 100:
-            self._end_game('Remis – 50-Züge-Regel')
-            return True
+        Clock.schedule_once(self._refresh,0)
 
-        position_key = _board_to_key(self.board)
-        if self.position_history.get(position_key, 0) >= 3:
-            self._end_game('Remis – 3× Wiederholung')
-            return True
+    # ── Zug anwenden ─────────────────────────────────────────────────
+    def _apply(self,mv,w):
+        pc=self.board[mv[0]][mv[1]]
+        nb,nc,ne,cap=do_move(self.board,mv,self.castle,self.ep)
+        self.board=nb; self.castle=nc; self.ep=ne; self.last_mv=mv
+        self.wturn=not w; self.mc+=1
+        if cap or(pc and pc.upper()=='P'): self.hclk=0
+        else: self.hclk+=1
+        ochk=in_check(self.board,not w)
+        self.chkside=(not w) if ochk else None
+        key=''.join(p or '.' for row in self.board for p in row)
+        self.phist[key]=self.phist.get(key,0)+1
+        cap_s=('x'+PL.get(cap,'?')) if cap else ''
+        chk_s='+' if ochk else ''
+        self.log_lines.append(
+            f"{self.mc}. {PL.get(pc,'?')}{FILES[mv[1]]}{8-mv[0]}"
+            f"{cap_s}{FILES[mv[3]]}{8-mv[2]}{chk_s}")
 
+    # ── Start/Stopp/Neu ───────────────────────────────────────────────
+    def start_game(self,*a):
+        if self.running: return
+        self._reset_state()
+        self._stop_ev.clear()
+        self.running=True
+        Clock.schedule_once(self._refresh,0)
+        if self.mode=='kiki':
+            self._setstatus('KI vs KI...')
+            threading.Thread(target=self._ki_loop,daemon=True).start()
+        elif self.mode=='human_ki':
+            if self.human_col:
+                self._setstatus('Dein Zug (Weiss)')
+            else:
+                self._setstatus('KI denkt...')
+                threading.Thread(target=self._ki_one,daemon=True).start()
+        else:
+            self._setstatus('Weiss am Zug')
+
+    def stop_game(self,*a):
+        self._stop_ev.set()
+        self.running=False; self._ki_busy=False
+        self._setstatus('Gestoppt.')
+
+    def new_game(self,*a):
+        self.stop_game()
+        def _do(dt):
+            self._reset_state()
+            self._stop_ev.clear()
+            Clock.schedule_once(self._refresh,0)
+            self._setstatus('Bereit  -  druecke START')
+        Clock.schedule_once(_do,0.3)
+
+    # ── KI-Schleifen ─────────────────────────────────────────────────
+    def _ki_loop(self):
+        while self.running and not self._stop_ev.is_set():
+            if self._check_end(): return
+            w=self.wturn
+            self._setstatus(('Weiss' if w else 'Schwarz')+' denkt...')
+            self._ki_busy=True
+            mv=think_ki(self.board,w,self.castle,self.ep,
+                        self.depth_w if w else self.depth_b,
+                        self._stop_ev,self.phist)
+            self._ki_busy=False
+            if self._stop_ev.is_set(): return
+            if mv:
+                self._apply(mv,w)
+                Clock.schedule_once(self._refresh,0)
+            time.sleep(0.3)
+
+    def _ki_one(self):
+        if self._stop_ev.is_set() or not self.running: return
+        w=self.wturn
+        self._setstatus(('Weiss' if w else 'Schwarz')+' (KI) denkt...')
+        self._ki_busy=True
+        mv=think_ki(self.board,w,self.castle,self.ep,
+                    self.depth_w if w else self.depth_b,
+                    self._stop_ev,self.phist)
+        self._ki_busy=False
+        if self._stop_ev.is_set() or not self.running: return
+        if mv:
+            self._apply(mv,w)
+            Clock.schedule_once(self._refresh,0)
+            if not self._check_end() and self.mode=='human_ki':
+                hw=self.human_col
+                nxt='Dein Zug ('+ ('Weiss' if hw else 'Schwarz')+')'
+                self._setstatus(nxt)
+
+    # ── Spielende ────────────────────────────────────────────────────
+    def _check_end(self):
+        lm=legal_moves(self.board,self.wturn,self.castle,self.ep)
+        msg=None
+        if not lm:
+            if in_check(self.board,self.wturn):
+                w='Schwarz' if self.wturn else 'Weiss'
+                msg=w+' gewinnt! Schachmatt!'
+            else:
+                msg='Remis - Patt!'
+        elif self.hclk>=100:
+            msg='Remis - 50-Zuege-Regel'
+        else:
+            key=''.join(p or '.' for row in self.board for p in row)
+            if self.phist.get(key,0)>=3:
+                msg='Remis - 3x Wiederholung'
+        if msg:
+            self._stop_ev.set(); self.running=False
+            self._setstatus(msg)
+            Clock.schedule_once(lambda dt:self._popup(msg),0.3)
+            Clock.schedule_once(self._refresh,0)
+            return True
         return False
 
-    def _end_game(self, message: str):
-        """Beendet das Spiel mit einer Nachricht."""
-        self._stop_event.set()
-        self.is_running = False
-        self._update_status(message)
-        Clock.schedule_once(lambda dt: self._show_popup(message), 0.2)
-
-    # ── Zug ausführen ─────────────────────────────────────────────────
-
-    def _apply_move(self, move: tuple, is_white: bool):
-        """Führt einen Zug aus und aktualisiert den gesamten Spielzustand."""
-        # Zustand für Undo speichern
-        self._history.append(GameState(
-            self.board, self.white_to_move, self.castling, self.en_passant,
-            self.position_history, self.halfmove_clock, self.move_number,
-            self.last_move, self.check_side,
-        ))
-
-        piece = self.board[move[0]][move[1]]
-        new_board, new_castling, new_ep, captured = execute_move(
-            self.board, move, self.castling, self.en_passant,
-        )
-
-        self.board = new_board
-        self.castling = new_castling
-        self.en_passant = new_ep
-        self.last_move = move
-        self.white_to_move = not is_white
-        self.move_number += 1
-
-        # Halbzug-Uhr (für 50-Züge-Regel)
-        if captured or (piece and piece.upper() == 'P'):
-            self.halfmove_clock = 0
-        else:
-            self.halfmove_clock += 1
-
-        # Schach-Status des Gegners
-        opponent_in_check = is_in_check(self.board, not is_white)
-        self.check_side = (not is_white) if opponent_in_check else None
-
-        # Stellungswiederholung tracken
-        position_key = _board_to_key(self.board)
-        self.position_history[position_key] = self.position_history.get(position_key, 0) + 1
-
-        # Zugnotation im Protokoll
-        piece_name = PIECE_DISPLAY.get(piece, '?')
-        capture_str = f'×{PIECE_DISPLAY.get(captured, captured)}' if captured else ''
-        check_str = '+' if opponent_in_check else ''
-        start_str = f'{FILE_NAMES[move[1]]}{8 - move[0]}'
-        end_str = f'{FILE_NAMES[move[3]]}{8 - move[2]}'
-        entry = f'{self.move_number}. {piece_name}{start_str}{capture_str}{end_str}{check_str}'
-        self._log_lines.append(entry)
-
-    # ── Feld-Tap-Handler ──────────────────────────────────────────────
-
-    def on_square_tap(self, row: int, col: int):
-        """Verarbeitet einen Tap auf ein Schachfeld."""
-        if not self.is_running or self._ai_busy:
-            return
-
-        # KI vs KI: kein menschlicher Eingriff
-        if self.mode == 'ai_vs_ai':
-            return
-
-        # Wer darf klicken?
-        if self.mode == 'human_vs_ai':
-            if self.white_to_move != self.human_plays_white:
-                return  # KI ist am Zug
-            human_is_white = self.human_plays_white
-        else:
-            human_is_white = self.white_to_move
-
-        # Erste Auswahl: Figur wählen
-        if self.selected_square is None:
-            piece = self.board[row][col]
-            if piece and is_white_piece(piece) == human_is_white:
-                self.selected_square = (row, col)
-                all_legal = get_legal_moves(self.board, human_is_white, self.castling, self.en_passant)
-                self.legal_targets = [
-                    (m[2], m[3]) for m in all_legal
-                    if m[0] == row and m[1] == col
-                ]
-        else:
-            # Zweite Auswahl: Zug ausführen oder andere Figur wählen
-            all_legal = get_legal_moves(self.board, human_is_white, self.castling, self.en_passant)
-            attempted_move = (self.selected_square[0], self.selected_square[1], row, col)
-
-            if attempted_move in all_legal:
-                # Legaler Zug → ausführen
-                self.selected_square = None
-                self.legal_targets = []
-                self._apply_move(attempted_move, human_is_white)
-                Clock.schedule_once(self._refresh_board, 0)
-
-                if not self._check_game_end():
-                    if self.mode == 'human_vs_ai':
-                        threading.Thread(target=self._ai_single_turn, daemon=True).start()
-                    else:
-                        color = '♙ Weiß' if self.white_to_move else '♟ Schwarz'
-                        self._update_status(f'{color} am Zug')
-                return
-            else:
-                # Andere eigene Figur auswählen?
-                piece = self.board[row][col]
-                if piece and is_white_piece(piece) == human_is_white:
-                    self.selected_square = (row, col)
-                    self.legal_targets = [
-                        (m[2], m[3]) for m in all_legal
-                        if m[0] == row and m[1] == col
-                    ]
-                else:
-                    self.selected_square = None
-                    self.legal_targets = []
-
-        Clock.schedule_once(self._refresh_board, 0)
-
     # ── UI-Helfer ─────────────────────────────────────────────────────
+    def _refresh(self,dt=0):
+        try:
+            self.board_grid.refresh(
+                self.board,self.selected,self.legal_hl,
+                self.last_mv,self.chkside)
+            wt=self.wturn
+            self.clock_w.text='Weiss'+(' < am Zug' if wt else '')
+            self.clock_b.text='Schwarz'+(' < am Zug' if not wt else '')
+            self.log_lbl.text='\n'.join(self.log_lines[-18:])
+        except Exception:
+            pass
 
-    def _refresh_board(self, dt=0):
-        """Aktualisiert Brett, Uhren und Zugprotokoll."""
-        self.board_widget.refresh(
-            self.board, self.selected_square, self.legal_targets,
-            self.last_move, self.check_side,
-        )
-        is_white_turn = self.white_to_move
-        self.clock_white_label.text = '♔ Weiß' + (' ◀ am Zug' if is_white_turn else '')
-        self.clock_black_label.text = '♚ Schwarz' + (' ◀ am Zug' if not is_white_turn else '')
-        self.log_label.text = '\n'.join(self._log_lines[-20:])
+    def _setstatus(self,txt):
+        def _do(dt):
+            try: self.status_lbl.text=str(txt)
+            except Exception: pass
+        Clock.schedule_once(_do,0)
 
-    def _update_status(self, text: str):
-        """Setzt den Statustext (threadsicher)."""
-        Clock.schedule_once(lambda dt: setattr(self.status_label, 'text', text), 0)
-
-    def _show_popup(self, message: str):
-        """Zeigt ein Popup-Fenster mit einer Nachricht."""
-        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
-        content.add_widget(Label(
-            text=message, font_size=dp(16),
-            color=COLOR_TEXT_LIGHT,
-        ))
-        ok_button = Button(
-            text='OK', size_hint_y=None, height=dp(40),
-            background_normal='', background_color=COLOR_BTN_ACTIVE,
-            color=COLOR_TEXT_DARK,
-        )
-        content.add_widget(ok_button)
-
-        popup = Popup(
-            title='Spiel beendet', content=content,
-            size_hint=(0.8, 0.4), auto_dismiss=False,
-        )
-        ok_button.bind(on_press=popup.dismiss)
-        popup.open()
+    def _popup(self,msg):
+        try:
+            content=BoxLayout(orientation='vertical',padding=dp(12),spacing=dp(8))
+            content.add_widget(Label(text=str(msg),font_size=dp(16),color=TXT_LT))
+            btn=Button(text='OK',size_hint_y=None,height=dp(44),
+                       background_normal='',background_color=ACCENT,color=ACCENT_T,
+                       font_size=dp(14),bold=True)
+            content.add_widget(btn)
+            pop=Popup(title='Spiel beendet',content=content,
+                      size_hint=(0.85,0.38),auto_dismiss=False)
+            btn.bind(on_press=pop.dismiss)
+            pop.open()
+        except Exception:
+            pass
 
     # ── Einstellungen ─────────────────────────────────────────────────
+    def open_settings(self,*a):
+        try:
+            content=BoxLayout(orientation='vertical',padding=dp(10),spacing=dp(8))
 
-    def open_settings(self):
-        """Öffnet das Einstellungs-Popup."""
-        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(10))
+            def row_label(txt):
+                content.add_widget(Label(
+                    text=txt,size_hint_y=None,height=dp(22),
+                    font_size=dp(12),color=ACCENT,halign='left'))
 
-        # -- Spielmodus --
-        content.add_widget(self._section_label('Spielmodus'))
-        mode_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(4))
-        for label, key in zip(self.MODE_LABELS, self.MODE_KEYS):
-            is_active = self.mode == key
-            btn = Button(
-                text=label, font_size=dp(11),
-                background_normal='',
-                background_color=COLOR_BTN_ACTIVE if is_active else COLOR_BTN_INACTIVE,
-                color=COLOR_TEXT_DARK if is_active else COLOR_TEXT_LIGHT,
-            )
+            def btn_row(options, current, on_pick):
+                row=BoxLayout(size_hint_y=None,height=dp(40),spacing=dp(4))
+                for lbl,val in options:
+                    active=(current==val)
+                    b=Button(text=lbl,font_size=dp(11),bold=active,
+                             background_normal='',
+                             background_color=ACCENT if active else BTN_DK,
+                             color=ACCENT_T if active else TXT_LT)
+                    b.bind(on_press=lambda x,v=val:on_pick(v))
+                    row.add_widget(b)
+                content.add_widget(row)
 
-            def on_mode_select(instance, mode_key=key):
-                self.mode = mode_key
-                popup.dismiss()
-                self.open_settings()
+            # Modus
+            row_label('Spielmodus')
+            def set_mode(v): self.mode=v; pop.dismiss(); self.open_settings()
+            btn_row([('KI vs KI','kiki'),('Mensch/KI','human_ki'),('Mensch/Mensch','human_human')],
+                    self.mode, set_mode)
 
-            btn.bind(on_press=on_mode_select)
-            mode_row.add_widget(btn)
-        content.add_widget(mode_row)
+            # Farbe (nur bei human_ki)
+            if self.mode=='human_ki':
+                row_label('Ich spiele')
+                def set_col(v): self.human_col=v; pop.dismiss(); self.open_settings()
+                btn_row([('Weiss',True),('Schwarz',False)], self.human_col, set_col)
 
-        # -- Farbwahl (nur bei Mensch vs KI) --
-        if self.mode == 'human_vs_ai':
-            content.add_widget(self._section_label('Ich spiele'))
-            color_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(4))
-            for label, value in [('Weiß ♙', True), ('Schwarz ♟', False)]:
-                is_active = self.human_plays_white == value
-                btn = Button(
-                    text=label, font_size=dp(12),
-                    background_normal='',
-                    background_color=COLOR_BTN_ACTIVE if is_active else COLOR_BTN_INACTIVE,
-                    color=COLOR_TEXT_DARK if is_active else COLOR_TEXT_LIGHT,
-                )
+            # Staerke
+            row_label('Weiss Staerke')
+            def set_dw(v): self.depth_w=v; pop.dismiss(); self.open_settings()
+            btn_row([('Einfach',1),('Mittel',2),('Stark',3)], self.depth_w, set_dw)
 
-                def on_color_select(instance, val=value):
-                    self.human_plays_white = val
-                    popup.dismiss()
-                    self.open_settings()
+            row_label('Schwarz Staerke')
+            def set_db(v): self.depth_b=v; pop.dismiss(); self.open_settings()
+            btn_row([('Einfach',1),('Mittel',2),('Stark',3)], self.depth_b, set_db)
 
-                btn.bind(on_press=on_color_select)
-                color_row.add_widget(btn)
-            content.add_widget(color_row)
+            close=Button(text='Schliessen',size_hint_y=None,height=dp(44),
+                         background_normal='',background_color=BTN_DK,
+                         color=TXT_LT,font_size=dp(13))
+            content.add_widget(close)
 
-        # -- KI-Stärke --
-        strength_options = [
-            ('♙ Weiß Stärke', 'depth_white'),
-            ('♟ Schwarz Stärke', 'depth_black'),
-        ]
-        for label, attribute in strength_options:
-            content.add_widget(self._section_label(label))
-            depth_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(4))
-            for depth, depth_label in [(1, 'Einfach'), (2, 'Mittel'), (3, 'Stark')]:
-                current_depth = getattr(self, attribute)
-                is_active = current_depth == depth
-                btn = Button(
-                    text=depth_label, font_size=dp(11),
-                    background_normal='',
-                    background_color=COLOR_BTN_ACTIVE if is_active else COLOR_BTN_INACTIVE,
-                    color=COLOR_TEXT_DARK if is_active else COLOR_TEXT_LIGHT,
-                )
+            pop=Popup(title='Einstellungen',content=content,
+                      size_hint=(0.95,0.88),auto_dismiss=True)
+            close.bind(on_press=pop.dismiss)
+            pop.open()
+        except Exception as e:
+            self._setstatus('Fehler: '+str(e))
 
-                def on_depth_select(instance, attr=attribute, val=depth):
-                    setattr(self, attr, val)
-                    popup.dismiss()
-                    self.open_settings()
-
-                btn.bind(on_press=on_depth_select)
-                depth_row.add_widget(btn)
-            content.add_widget(depth_row)
-
-        # Schließen-Button
-        close_button = Button(
-            text='Schließen', size_hint_y=None, height=dp(42),
-            background_normal='', background_color=COLOR_BTN_INACTIVE,
-            color=COLOR_TEXT_LIGHT, font_size=dp(13),
-        )
-        content.add_widget(close_button)
-
-        popup = Popup(
-            title='⚙ Einstellungen', content=content,
-            size_hint=(0.95, 0.85), auto_dismiss=True,
-        )
-        close_button.bind(on_press=popup.dismiss)
-        popup.open()
-
-    @staticmethod
-    def _section_label(text: str) -> Label:
-        """Erzeugt ein Abschnitts-Label für die Einstellungen."""
-        return Label(
-            text=text, size_hint_y=None, height=dp(24),
-            font_size=dp(13), color=list(COLOR_ACCENT) + [1],
-            halign='left',
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  EINSTIEGSPUNKT
-# ═══════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     ChessApp().run()
