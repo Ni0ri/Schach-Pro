@@ -100,14 +100,22 @@ def gen_pseudo(board, r, c, w, castle, ep):
                 mvs.append((r,c,kr,2))
     return mvs
 
+PROMO = ('Q','R','B','N')
+
+def is_promo(board, mv):
+    p=board[mv[0]][mv[1]]
+    return bool(p and p.upper()=='P' and mv[2] in (0,7))
+
 def do_move(board, mv, castle, ep):
+    # mv = (r1,c1,r2,c2) oder (r1,c1,r2,c2,Umwandlungsfigur) – Standard Dame
     b=[list(row) for row in board]
-    r1,c1,r2,c2=mv; p=b[r1][c1]; pt=p.upper()
+    r1,c1,r2,c2=mv[:4]; p=b[r1][c1]; pt=p.upper()
     cap=b[r2][c2]; nep=None
     b[r2][c2]=p; b[r1][c1]=None
     if pt=='P':
-        if r2==0: b[r2][c2]='Q'
-        elif r2==7: b[r2][c2]='q'
+        if r2 in (0,7):
+            pr=mv[4].upper() if len(mv)>4 and mv[4] and mv[4].upper() in PROMO else 'Q'
+            b[r2][c2]=pr if iw(p) else pr.lower()
         elif ep==(r2,c2):
             er=r2+(1 if iw(p) else -1); cap=b[er][c2]; b[er][c2]=None
         if abs(r2-r1)==2: nep=((r1+r2)//2,c2)
@@ -330,6 +338,8 @@ class ChessApp(App):
         self.legal_hl=[]
         self.log_lines=[]
         self.running=False
+        self._promo_pending=False
+        self._game_id=getattr(self,'_game_id',0)+1
 
     # ── Build UI ──────────────────────────────────────────────────────
     def build(self):
@@ -412,6 +422,7 @@ class ChessApp(App):
             hw=self.wturn
 
         # Figur auswählen
+        if self._promo_pending: return
         if self.selected is None:
             p=self.board[r][c]
             if p and iw(p)==hw:
@@ -422,15 +433,10 @@ class ChessApp(App):
             lm=legal_moves(self.board,hw,self.castle,self.ep)
             mv=(self.selected[0],self.selected[1],r,c)
             if mv in lm:
-                self.selected=None; self.legal_hl=[]
-                self._apply(mv,hw)
-                Clock.schedule_once(self._refresh,0)
-                if not self._check_end():
-                    if self.mode=='human_ki':
-                        threading.Thread(target=self._ki_one,daemon=True).start()
-                    else:
-                        nxt='Weiss' if self.wturn else 'Schwarz'
-                        self._setstatus(nxt+' am Zug')
+                if is_promo(self.board,mv):
+                    self._ask_promo(mv,hw)
+                    return
+                self._human_move(mv,hw)
                 return
             else:
                 p=self.board[r][c]
@@ -442,6 +448,63 @@ class ChessApp(App):
                     self.selected=None; self.legal_hl=[]
 
         Clock.schedule_once(self._refresh,0)
+
+    def _human_move(self,mv,hw):
+        self.selected=None; self.legal_hl=[]
+        self._apply(mv,hw)
+        Clock.schedule_once(self._refresh,0)
+        if not self._check_end():
+            if self.mode=='human_ki':
+                threading.Thread(target=self._ki_one,daemon=True).start()
+            else:
+                nxt='Weiss' if self.wturn else 'Schwarz'
+                self._setstatus(nxt+' am Zug')
+
+    # ── Bauernumwandlung ─────────────────────────────────────────────
+    def _ask_promo(self,mv,hw):
+        self._promo_pending=True
+        state={'done':False}; gid=self._game_id
+        try:
+            content=BoxLayout(orientation='vertical',padding=dp(10),spacing=dp(8))
+            row=BoxLayout(size_hint_y=None,height=dp(64),spacing=dp(6))
+            content.add_widget(row)
+            cancel=Button(text='Abbrechen',size_hint_y=None,height=dp(44),
+                          background_normal='',background_color=BTN_DK,
+                          color=TXT_LT,font_size=dp(13))
+            content.add_widget(cancel)
+            pop=Popup(title='Umwandlung waehlen',content=content,
+                      size_hint=(0.9,0.34),auto_dismiss=True)
+
+            def pick(pt):
+                state['done']=True
+                pop.dismiss()
+                if gid!=self._game_id: return   # Spiel inzwischen neu gestartet
+                self._promo_pending=False
+                if not self.running or self.wturn!=hw:
+                    self.selected=None; self.legal_hl=[]
+                    Clock.schedule_once(self._refresh,0)
+                    return
+                self._human_move(tuple(mv[:4])+(pt,),hw)
+
+            def on_dismiss(*a):
+                if state['done'] or gid!=self._game_id: return
+                self._promo_pending=False
+                self.selected=None; self.legal_hl=[]
+                Clock.schedule_once(self._refresh,0)
+
+            for pt in PROMO:
+                b=Button(text=PL[pt if hw else pt.lower()],font_size=dp(24),bold=True,
+                         background_normal='',background_color=ACCENT,color=ACCENT_T)
+                b.bind(on_press=lambda x,v=pt:pick(v))
+                row.add_widget(b)
+            cancel.bind(on_press=pop.dismiss)
+            pop.bind(on_dismiss=on_dismiss)
+            pop.open()
+        except Exception as e:
+            self._promo_pending=False
+            self.selected=None; self.legal_hl=[]
+            self._setstatus('Fehler: '+str(e))
+            Clock.schedule_once(self._refresh,0)
 
     # ── Zug anwenden ─────────────────────────────────────────────────
     def _apply(self,mv,w):
@@ -457,9 +520,11 @@ class ChessApp(App):
         self.phist[key]=self.phist.get(key,0)+1
         cap_s=('x'+PL.get(cap,'?')) if cap else ''
         chk_s='+' if ochk else ''
+        pr=self.board[mv[2]][mv[3]]
+        promo_s=('='+PL.get(pr.upper(),'?')) if pc and pc.upper()=='P' and mv[2] in (0,7) else ''
         self.log_lines.append(
             f"{self.mc}. {PL.get(pc,'?')}{FILES[mv[1]]}{8-mv[0]}"
-            f"{cap_s}{FILES[mv[3]]}{8-mv[2]}{chk_s}")
+            f"{cap_s}{FILES[mv[3]]}{8-mv[2]}{promo_s}{chk_s}")
 
     # ── Start/Stopp/Neu ───────────────────────────────────────────────
     def start_game(self,*a):
